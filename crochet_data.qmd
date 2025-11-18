@@ -1,0 +1,363 @@
+#Garrett Crochet Pitch Analysis Project
+
+##Pulling and Cleaning Data
+
+```{r}
+library(baseballr)
+library(purrr)
+library(dplyr)
+crochet_pk <- c(778553, 778483,
+778404, 778338, 778264, 778196, 778127, 778063, 777977, 777908, 777831, 777764, 777692, 777605, 777537, 777453, 777376, 777300, 777213, 777144, 777075, 776998, 776864, 776782, 776714, 776627, 776564, 776493, 776410, 776330, 776261, 776206)
+crochet_pbp <- map_dfr(crochet_pk, ~ {
+  mlb_pbp(game_pk = .x) |>
+    filter(matchup.pitcher.fullName == "Garrett Crochet", type =="pitch")
+})
+```
+
+Here, we found the game_pk identifier tags for each game Crochet pitched in and pulled the pitch by pitch data for those games, filtering so that we only had pitches thrown by Crochet.
+
+
+```{r}
+crochet_pbp_clean <- crochet_pbp|>
+  select(game_date, matchup.pitcher.fullName, about.atBatIndex, pitchNumber,details.description,details.code, count.balls.start, count.strikes.start, count.outs.start, result.event, pitchData.coordinates.x, pitchData.coordinates.y, matchup.batter.fullName, matchup.batSide.description, details.type.description, pitchData.startSpeed, pitchData.zone, hitData.launchSpeed, hitData.launchAngle, hitData.hardness, about.inning, about.hasOut)
+
+crochet_pbp_clean <- crochet_pbp_clean %>%
+  arrange(game_date, about.atBatIndex, pitchNumber) %>% 
+  mutate(index = row_number())
+```
+
+Here, we select the variables that we are going to use for our project and give each pitch an index number to help identify the pitches chronologically. 
+
+```{r}
+crochet_pbp_clean <- crochet_pbp_clean %>%
+  arrange(index)
+
+balls <- 0
+strikes <- 0
+beforeBalls <- numeric(nrow(crochet_pbp_clean))
+beforeStrikes <- numeric(nrow(crochet_pbp_clean))
+
+for (i in seq_len(nrow(crochet_pbp_clean))) {
+  if (crochet_pbp_clean$pitchNumber[i] == 1) {
+    balls <- 0
+    strikes <- 0
+    beforeBalls[i] <- 0
+    beforeStrikes[i] <- 0
+  } else {
+    beforeBalls[i] <- balls
+    beforeStrikes[i] <- strikes
+  }
+  
+  if (crochet_pbp_clean$details.description[i] %in% c("Ball", "Ball In Dirt", "Hit By Pitch")) {
+    balls <- balls + 1
+  }
+
+  if (crochet_pbp_clean$details.description[i] %in% c("Called Strike", "Swinging Strike",
+                                              "Swinging Strike (Blocked)",
+                                              "Foul", "Foul Tip", "Foul Bunt")) {
+    if (strikes < 2) {
+      strikes <- strikes + 1
+    }
+  }
+}
+
+crochet_pbp_clean$beforeBalls <- beforeBalls
+crochet_pbp_clean$beforeStrikes <- beforeStrikes
+crochet_pbp_clean$count <- paste0(beforeBalls, "-", beforeStrikes)
+crochet_pbp_clean <- crochet_pbp_clean |>
+  arrange(index) |>  
+  mutate(atBat_id = paste0(game_date, "_", about.atBatIndex))
+
+```
+
+This is the section where we create a count variable. We do this by first arranging the data in chronological order, and then starting a running count of balls and strikes. We then add to that running count based on the result of the pitch, and it gives us a variable that we can work with, count before the pitch is thrown. 
+
+#Creating Expected Runs Metric
+
+```{r}
+library(tidyverse)
+library(baseballr)
+
+weeks <- tibble(
+  start = c("2025-04-15", "2025-05-20", "2025-06-25", "2025-08-01", "2025-09-05"),
+  end   = c("2025-04-22", "2025-05-27", "2025-07-02", "2025-08-08", "2025-09-12")
+)
+
+get_in_play_balls <- function(start_date, end_date) {
+  
+  data <- tryCatch(
+    statcast_search(start_date = start_date, end_date = end_date, player_type = "batter"),
+    error = function(e) NULL  # simply return NULL if there’s an error
+  )
+  
+  if (!is.null(data)) {
+    data %>%
+      filter(description == "hit_into_play") %>%
+      select(
+        game_date,
+        batter,
+        events,        
+        description,           
+        launch_speed,
+        launch_angle,
+        hc_x, hc_y,
+        stand,
+        home_team
+      )
+  } else {
+    NULL
+  }
+}
+
+in_play_all <- map2_dfr(weeks$start, weeks$end, get_in_play_balls)
+```
+
+This code pulls random samples of batted ball events from different times during the 2025 regular season. It takes that sample and selects certain variables and makes it into a new data table.  
+
+```{r}
+
+binned_data <- in_play_all %>%
+  mutate(
+    velo_bin = cut(
+      launch_speed,
+      breaks = seq(0, 120, by = 10),
+      include.lowest = TRUE,
+      right = FALSE,
+      labels = paste(seq(0, 110, by = 10), seq(10, 120, by = 10), sep = "-")
+    ),
+    angle_bin = cut(
+      launch_angle,
+      breaks = seq(-50, 50, by = 5),
+      include.lowest = TRUE,
+      right = FALSE,
+      labels = paste(seq(-50, 45, by = 5), seq(-45, 50, by = 5), sep = "-")
+    )
+  )
+bin_event_counts <- binned_data %>%
+  group_by(velo_bin, angle_bin, events) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  arrange(velo_bin, angle_bin, events)
+binned_event_table <- binned_data %>%
+  group_by(velo_bin, angle_bin, events) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = events,
+    values_from = count,
+    values_fill = 0  # fill missing event types with 0
+  ) %>%
+  arrange(velo_bin, angle_bin)
+```
+
+Here, we are binning exit velocities and launch angles, to group batted balls in an effort to predict average outcomes of batted balls. 
+
+```{r}
+event_weights <- c(
+  single = 0.73,
+  double = 1.14,
+  triple = 1.49,
+  home_run = 1.92,
+  sac_bunt = -0.3,
+  field_out = -0.3,
+  fielders_choice = -0.3,
+  double_play = -0.3,
+  fielders_choice_out = -0.3,
+  force_out = -0.3,
+  field_error = -0.3,
+  grounded_into_double_play = -0.3,
+  sac_fly = -0.3,
+  sac_fly_double_play = -0.3,
+  catcher_interf = 0
+)
+
+binned_event_table_final <- binned_event_table %>%
+  rowwise() %>%
+  mutate(
+    total_n = sum(c_across(sac_bunt:home_run), na.rm = TRUE),
+    expected_runs = sum(
+      single * event_weights["single"],
+      double * event_weights["double"],
+      triple * event_weights["triple"],
+      home_run * event_weights["home_run"],
+      sac_bunt * event_weights["sac_bunt"],
+      field_out * event_weights["field_out"],
+      fielders_choice * event_weights["fielders_choice"],
+      double_play * event_weights["double_play"],
+      fielders_choice_out * event_weights["fielders_choice_out"],
+      force_out * event_weights["force_out"],
+      field_error * event_weights["field_error"],
+      grounded_into_double_play * event_weights["grounded_into_double_play"],
+      sac_fly * event_weights["sac_fly"],
+      sac_fly_double_play * event_weights["sac_fly_double_play"],
+      na.rm = TRUE
+    ),
+    avg_expected_runs = expected_runs / total_n
+  ) %>%
+  ungroup() %>%
+  filter(total_n >= 20) %>%
+  select(velo_bin, angle_bin, avg_expected_runs)
+```
+
+Here we take average run values of each type of batted ball, provided by the Tom Tango article "Linear Weights by Men on Base", using the average value of each outcome. I decided to treat all outs the same way since at face value, a ground out and a double play can be the same batted ball, and the table didn't feature values for weighted runs of double plays or other balls in play resulting in outs. We looked at our binned batted balls table and produced an average expected runs value for each batted ball bin. 
+
+```{r}
+ball_strike_values <- tribble(
+  ~count, ~strike_delta, ~ball_delta,
+  "0-0", -0.048, 0.045,
+  "0-1", -0.066, 0.031,
+  "0-2", -0.196, 0.027,
+  "1-0", -0.062, 0.081,
+  "1-1", -0.070, 0.059,
+  "1-2", -0.223, 0.050,
+  "2-0", -0.084, 0.186,
+  "2-1", -0.079, 0.118,
+  "2-2", -0.273, 0.111,
+  "3-0", -0.152, 0.067,
+  "3-1", -0.086, 0.219,
+  "3-2", -0.384, 0.305
+)
+
+scale_factor <- 0.3806
+
+ball_strike_values <- ball_strike_values %>%
+  mutate(
+    strike_delta_run = strike_delta * scale_factor,
+    ball_delta_run = ball_delta * scale_factor,
+    benefit_vs_ball = strike_delta_run - ball_delta_run
+  )
+```
+
+Now we attempt to determine the value of each pitch in every different type of count. We are using values from Dan Meyer's "Dynamic Value of Throwing a Strike". While that article didn't have a pure expected run value, we knew since we were working off of the same statistics as wOBA, we could scale wOBA impact into expected runs. We did this by dividing the wOBA average by runs/plate appearance average for 2025, and used this to calculate the expected run impact of balls and strikes in different counts. 
+
+```{r}
+crochet_pbp_clean <- crochet_pbp_clean %>%
+  mutate(
+    pitch_category = case_when(
+      details.code %in% c("B", "*B") ~ "ball",
+      details.code %in% c("C", "S", "T", "W") ~ "strike",
+      details.code %in% c("F") & beforeStrikes < 2 ~ "strike",
+      details.code %in% c("F") & beforeStrikes == 2 ~ "no_change",
+      details.code == "L" ~ "strike",
+      details.code %in% c("D", "X", "E", "O") ~ "in_play",
+      details.code == "H" ~ "hbp_single",  
+      TRUE ~ "other"
+    )
+  )
+
+crochet_pbp_clean <- crochet_pbp_clean %>%
+  mutate(
+    velo_bin = if_else(
+      pitch_category == "in_play",
+      cut(
+        hitData.launchSpeed,
+        breaks = seq(0, 120, by = 10),
+        include.lowest = TRUE,
+        right = FALSE,
+        labels = paste(seq(0, 110, by = 10), seq(10, 120, by = 10), sep = "-")
+      ),
+      NA_character_
+    ),
+    angle_bin = if_else(
+      pitch_category == "in_play",
+      cut(
+        hitData.launchAngle,
+        breaks = seq(-50, 50, by = 5),
+        include.lowest = TRUE,
+        right = FALSE,
+        labels = paste(seq(-50, 45, by = 5), seq(-45, 50, by = 5), sep = "-")
+      ),
+      NA_character_
+    )
+  )
+```
+
+Here, we took the data from Garrett Crochet's pitches and binned the batted balls to match the bins in the random sample that we had pulled. 
+
+```{r}
+crochet_pbp_clean <- crochet_pbp_clean %>%
+
+  left_join(ball_strike_values, by = "count") %>%
+  mutate(
+    expected_run_value = case_when(
+      pitch_category == "strike"     ~ strike_delta_run,
+      pitch_category == "ball"       ~ ball_delta_run,
+      pitch_category == "no_change"  ~ 0,
+      pitch_category == "hbp_single" ~ 0.73  
+    )
+  ) %>%
+  
+  left_join(binned_event_table_final, by = c("velo_bin", "angle_bin")) %>%
+  mutate(
+    expected_run_value = if_else(
+      pitch_category == "in_play",
+      avg_expected_runs,  
+      expected_run_value
+    )
+  )
+```
+
+```{r}
+crochet_final <- crochet_pbp_clean |> select(game_date, pitchNumber, details.description, matchup.batter.fullName, matchup.batSide.description, pitchData.startSpeed, pitchData.zone, details.type.description, hitData.launchSpeed, hitData.launchAngle, count, expected_run_value)
+```
+
+Finally, we left joined the data and made our final data table, with an added run value on each of Crochet's pitches from the 2025 regular season. 
+
+```{r}
+pitch_val <- function(data, count, batter_side, pitch_type, zone, conf = 0.95) {
+  
+  # Filter data
+  subset <- data |>
+    filter(
+      count == !!count,
+      matchup.batSide.description == !!batter_side,
+      details.type.description == !!pitch_type,
+      pitchData.zone == !!zone
+    )
+  
+  # If no matching rows, return NA
+  if (nrow(subset) == 0) {
+    return(tibble(
+      count = count,
+      batter_side = batter_side,
+      pitch_type = pitch_type,
+      zone = zone,
+      n = 0,
+      mean_run_value = NA,
+      lower_CI = NA,
+      upper_CI = NA
+    ))
+  }
+  
+  # Summary stats
+  mean_val <- mean(subset$expected_run_value, na.rm = TRUE)
+  sd_val <- sd(subset$expected_run_value, na.rm = TRUE)
+  n <- sum(!is.na(subset$expected_run_value))
+  
+  # 95% confidence interval (t-based)
+  error <- qt(conf + (1 - conf)/2, df = n - 1) * sd_val / sqrt(n)
+  lower <- mean_val - error
+  upper <- mean_val + error
+  
+  tibble(
+    count = count,
+    batter_side = batter_side,
+    pitch_type = pitch_type,
+    zone = zone,
+    n = n,
+    mean_run_value = mean_val,
+    lower_CI = lower,
+    upper_CI = upper
+  )
+}
+```
+
+```{r}
+pitch_val(crochet_final, "3-2", "Left", "Sweeper", 14)
+```
+
+Brainstorming possibilities for tools to add
+
+Visualizations Heat map for different pitches Contrasting Distributions for Different Pitches in Different scenarios All encompassing shiny app?
+
+Tools Model to suggest most effective pitches in different spots
+
+Next Steps Using the data to find effectiveness in pitch sequencing

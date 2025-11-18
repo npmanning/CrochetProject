@@ -1,5 +1,3 @@
 The main motivation for this project was to provide pitchers, catchers, and managers with direction within a game as to what pitch they could throw that would be the most effective. A pitcher throws different pitches that move in different ways, with some pitches and locations easier to hit than others. Every pitcher has varying ability to throw the ball harder or with more spin, but if a pitcher is able to use statistical tools to figure out when to throw which pitch, it will increase his effectiveness.
 
 The first part of the project will explain how the data was obtained, cleaned, merged, and manipulated to work with the project that I was attempting. The second part will focus on how the "Expected Runs" metric used in the project was created. The third part will explain and show the tools and visualizations that we created using the data and how they could be used within the context of a game. 
-
-There are also two apps accompanying the project that are the tools that were created using the dataset. 
